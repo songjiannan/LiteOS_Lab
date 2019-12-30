@@ -1,6 +1,5 @@
 
 #include "mbedtls/md.h"
-#include "mbedtls/pk.h"
 #include "stdint.h"
 #include "ota_flag.h"
 
@@ -15,6 +14,8 @@ static uint8_t *sign_cache = NULL;
 
 #define HASH_LEN   (32)
 
+#if defined(MBEDTLS_PK_PARSE_C)
+#include "mbedtls/pk.h"
 static uint8_t prv_public_key[] = "-----BEGIN PUBLIC KEY-----\n"
 "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo1++6Iw1EgsZCUwBpg/i\n"
 "NlEgIjaBwDqLABFTmnPFSW9KDwaffjd1xzRwWxUPaQqpq3UEzj7ZWJFx07uLar1+\n"
@@ -24,6 +25,11 @@ static uint8_t prv_public_key[] = "-----BEGIN PUBLIC KEY-----\n"
 "5pibPkfjjawioq1KCIMQNeAM/VtmpuKyDznHrgtLA1hOXeK7F63FEJ9T1Ib/00a5\n"
 "PQIDAQAB\n"
 "-----END PUBLIC KEY-----";
+#else
+#include "mbedtls/aes.h"
+static uint8_t prv_psk[] = "01234567";       // max: 16 bytes
+#endif
+
 
 static int ota_pack_calc_stream_init(int sign_len, int file_size)
 {
@@ -115,12 +121,11 @@ int ota_pack_calc_hash(uint8_t *hash_out)
   mbedtls_md_free( &ctx );
   return( ret );
 }
-
+#if defined(MBEDTLS_PK_PARSE_C)
 static int ota_pack_verify_signature(uint8_t *hash, int32_t hash_len, uint8_t *sig, int32_t sig_len)
 {
-  int ret;
+  int ret = 0;
   mbedtls_pk_context pk;
-
   //load public key
   mbedtls_pk_init(&pk);
   ret = mbedtls_pk_parse_public_key(&pk, prv_public_key, sizeof(prv_public_key));
@@ -128,7 +133,7 @@ static int ota_pack_verify_signature(uint8_t *hash, int32_t hash_len, uint8_t *s
     printf ("parse pk failed!, ret = %x\n", ret);
     goto exit;
   }
-  
+
   if ((ret = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, 0, sig, sig_len)) != 0) {
     printf (" pk verify failed , ret = %x\n", -ret);
     goto exit;
@@ -139,6 +144,34 @@ static int ota_pack_verify_signature(uint8_t *hash, int32_t hash_len, uint8_t *s
   mbedtls_pk_free( &pk );
   return ret;
 }
+#else
+static int ota_pack_verify_signature(uint8_t *hash, int32_t hash_len, uint8_t *sig, int32_t sig_len)
+{
+    int ret = 0;
+    int i = 0;
+    uint8_t tmp_key[256];
+    mbedtls_aes_context aes_ctx;
+    mbedtls_md_context_t sha_ctx;
+
+    mbedtls_md_init(&sha_ctx);
+
+    mbedtls_md_setup( &sha_ctx, mbedtls_md_info_from_type( MBEDTLS_MD_SHA256 ), 1 );
+
+    memset(&tmp_key, 0, sizeof(tmp_key));
+    mbedtls_md_hmac_starts(&sha_ctx, prv_psk, strlen(prv_psk));
+    mbedtls_md_hmac_update(&sha_ctx, hash, hash_len);
+    mbedtls_md_hmac_finish(&sha_ctx, tmp_key);
+
+    for (i = 0; i < 256; i++) {
+        if (sig[i] ^ tmp_key[i]) {
+            return 1;
+        }
+    }
+
+    return 0;
+    
+}
+#endif
 
 int ota_pack_get_signature_verify_result(int sign_len, int file_len)
 {
@@ -148,7 +181,7 @@ int ota_pack_get_signature_verify_result(int sign_len, int file_len)
   ota_pack_calc_hash(hash_cache);
   ota_storage_bin_read(0, sign_cache, sign_len);
   
-  if ( (ret = ota_pack_verify_signature(hash_cache, 0, sign_cache, sign_len)) != 0) {
+  if ( (ret = ota_pack_verify_signature(hash_cache, 32, sign_cache, sign_len)) != 0) {
     printf("ota Binary signature check failed!, ret = %x\n", ret);
   }
 
